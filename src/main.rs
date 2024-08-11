@@ -1,27 +1,56 @@
-use std::{collections::{HashMap, HashSet}, net::SocketAddr, ops::{ControlFlow}, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    ops::ControlFlow,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+    fs,
+};
 
-use axum::{extract::{ws::{Message, WebSocket}, ConnectInfo, State, WebSocketUpgrade}, http::StatusCode, response::IntoResponse, routing::get, Extension, Router};
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        ConnectInfo, State, WebSocketUpgrade,
+    },
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+    Extension, Router,
+};
 use axum_extra::{headers::authorization::Basic, TypedHeader};
 use clap::Parser;
-use drillx::{Solution};
+use drillx::Solution;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use ore_api::{consts::BUS_COUNT, state::Proof};
-use ore_utils::{get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS};
+use ore_utils::{
+    get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS,
+};
 use rand::Rng;
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_sdk::{commitment_config::CommitmentConfig, compute_budget::ComputeBudgetInstruction, native_token::LAMPORTS_PER_SOL, pubkey::Pubkey, signature::read_keypair_file, signer::Signer, transaction::Transaction};
-use tokio::sync::{mpsc::{UnboundedReceiver, UnboundedSender}, Mutex, RwLock};
+use solana_sdk::{
+    commitment_config::CommitmentConfig, 
+    compute_budget::ComputeBudgetInstruction,
+    native_token::LAMPORTS_PER_SOL, 
+    pubkey::Pubkey, 
+    signature::read_keypair_file, 
+    signature::Keypair,
+    signer::Signer,
+    transaction::Transaction,
+};
+use tokio::sync::{
+    mpsc::{UnboundedReceiver, UnboundedSender},
+    Mutex, RwLock,
+};
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{debug, error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-
 const MIN_DIFF: u32 = 8;
 const MIN_HASHPOWER: u64 = 5;
 
-
 struct AppState {
-    sockets: HashMap<SocketAddr, Mutex<SplitSink<WebSocket, Message>>>
+    sockets: HashMap<SocketAddr, Mutex<SplitSink<WebSocket, Message>>>,
 }
 
 pub struct MessageInternalMineSuccess {
@@ -34,13 +63,12 @@ pub struct MessageInternalMineSuccess {
 pub enum ClientMessage {
     Ready(SocketAddr),
     Mining(SocketAddr),
-    BestSolution(SocketAddr, Solution)
+    BestSolution(SocketAddr, Solution),
 }
 
 pub struct EpochHashes {
     best_hash: BestHash,
     submissions: HashMap<Pubkey, u32>,
-
 }
 
 pub struct BestHash {
@@ -67,7 +95,6 @@ struct Args {
     priority_fee: u64,
 }
 
-
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenv::dotenv().ok();
@@ -82,6 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // load envs
     let wallet_path_str = std::env::var("WALLET_PATH").expect("WALLET_PATH must be set.");
+    let key_folder = std::env::var("KEY_FOLDER").expect("KEY_FOLDER must be set.");
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set.");
     let password = std::env::var("PASSWORD").expect("PASSWORD must be set.");
     let priority_fee = Arc::new(Mutex::new(args.priority_fee));
@@ -94,7 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("Failed to find wallet path.".into());
     }
 
-    let wallet = read_keypair_file(wallet_path).expect("Failed to load keypair from file: {wallet_path_str}");
+    let wallet = read_keypair_file(wallet_path)
+        .expect("Failed to load keypair from file: {wallet_path_str}");
     println!("loaded wallet {}", wallet.pubkey().to_string());
 
     println!("establishing rpc connection...");
@@ -122,15 +151,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ix = get_register_ix(wallet.pubkey());
 
         if let Ok((hash, _slot)) = rpc_client
-            .get_latest_blockhash_with_commitment(rpc_client.commitment()).await {
+            .get_latest_blockhash_with_commitment(rpc_client.commitment())
+            .await
+        {
             let mut tx = Transaction::new_with_payer(&[ix], Some(&wallet.pubkey()));
 
             tx.sign(&[&wallet], hash);
 
             let result = rpc_client
                 .send_and_confirm_transaction_with_spinner_and_commitment(
-                    &tx, rpc_client.commitment()
-                ).await;
+                    &tx,
+                    rpc_client.commitment(),
+                )
+                .await;
 
             if let Ok(sig) = result {
                 println!("Sig: {}", sig.to_string());
@@ -146,13 +179,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         proof
     };
 
-    let config = Arc::new(Mutex::new(Config {
-        password,
-    }));
+    let config = Arc::new(Mutex::new(Config { password }));
 
     let best_hash = Arc::new(Mutex::new(BestHash {
         solution: None,
-        difficulty: 0
+        difficulty: 0,
     }));
 
     let wallet_extension = Arc::new(wallet);
@@ -164,7 +195,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
     let ready_clients = Arc::new(Mutex::new(HashSet::new()));
 
-    let (client_message_sender, client_message_receiver) = tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
+    let (client_message_sender, client_message_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<ClientMessage>();
 
     // Handle client messages
     let app_shared_state = shared_state.clone();
@@ -172,7 +204,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_proof = proof_ext.clone();
     let app_best_hash = best_hash.clone();
     tokio::spawn(async move {
-        client_message_handler_system(client_message_receiver, &app_shared_state, app_ready_clients, app_proof, app_best_hash).await;
+        client_message_handler_system(
+            client_message_receiver,
+            &app_shared_state,
+            app_ready_clients,
+            app_proof,
+            app_best_hash,
+        )
+        .await;
     });
 
     // Handle ready clients
@@ -182,7 +221,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_nonce = nonce_ext.clone();
     tokio::spawn(async move {
         loop {
-
             let mut clients = Vec::new();
             {
                 let ready_clients_lock = ready_clients.lock().await;
@@ -191,16 +229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            let proof = {
-                app_proof.lock().await.clone()
-            };
+            let proof = { app_proof.lock().await.clone() };
 
             let cutoff = get_cutoff(proof, 5);
             let mut should_mine = true;
             let cutoff = if cutoff <= 0 {
-                let solution = {
-                    app_best_hash.lock().await.solution
-                };
+                let solution = { app_best_hash.lock().await.solution };
                 if solution.is_some() {
                     should_mine = false;
                 }
@@ -234,9 +268,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         bin_data[41..49].copy_from_slice(&nonce_range.start.to_le_bytes());
                         bin_data[49..57].copy_from_slice(&nonce_range.end.to_le_bytes());
 
-
                         if let Some(sender) = shared_state.sockets.get(&client) {
-                            let _ = sender.lock().await.send(Message::Binary(bin_data.to_vec())).await;
+                            let _ = sender
+                                .lock()
+                                .await
+                                .send(Message::Binary(bin_data.to_vec()))
+                                .await;
                             let _ = ready_clients.lock().await.remove(&client);
                         }
                     }
@@ -247,7 +284,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    let (mine_success_sender, mut mine_success_receiver) = tokio::sync::mpsc::unbounded_channel::<MessageInternalMineSuccess>();
+    let (mine_success_sender, mut mine_success_receiver) =
+        tokio::sync::mpsc::unbounded_channel::<MessageInternalMineSuccess>();
 
     let rpc_client = Arc::new(rpc_client);
     let app_proof = proof_ext.clone();
@@ -257,23 +295,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_prio_fee = priority_fee.clone();
     tokio::spawn(async move {
         loop {
-            let proof = {
-                app_proof.lock().await.clone()
-            };
+            let proof = { app_proof.lock().await.clone() };
 
             let cutoff = get_cutoff(proof, 0);
             if cutoff <= 0 {
                 // process solutions
-                let solution = {
-                    app_best_hash.lock().await.solution.clone()
-                };
+                let solution = { app_best_hash.lock().await.solution.clone() };
                 if let Some(solution) = solution {
                     let signer = app_wallet.clone();
                     let mut ixs = vec![];
                     // TODO: set cu's
-                    let prio_fee = {
-                        priority_fee.lock().await.clone()
-                    };
+                    let prio_fee = { priority_fee.lock().await.clone() };
 
                     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(480000);
                     ixs.push(cu_limit_ix);
@@ -290,12 +322,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let ix_mine = get_mine_ix(signer.pubkey(), solution, bus);
                     ixs.push(ix_mine);
-                    info!("Starting mine submission attempts with difficulty {}.", difficulty);
-                    if let Ok((hash, _slot)) = rpc_client.get_latest_blockhash_with_commitment(rpc_client.commitment()).await {
+                    info!(
+                        "Starting mine submission attempts with difficulty {}.",
+                        difficulty
+                    );
+                    if let Ok((hash, _slot)) = rpc_client
+                        .get_latest_blockhash_with_commitment(rpc_client.commitment())
+                        .await
+                    {
                         let mut tx = Transaction::new_with_payer(&ixs, Some(&signer.pubkey()));
 
                         tx.sign(&[&signer], hash);
-                        
+
                         for i in 0..3 {
                             info!("Sending signed tx...");
                             info!("attempt: {}", i + 1);
@@ -306,20 +344,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 info!("Sig: {}", sig);
                                 // update proof
                                 loop {
-                                    if let Ok(loaded_proof) = get_proof(&rpc_client, signer.pubkey()).await {
+                                    if let Ok(loaded_proof) =
+                                        get_proof(&rpc_client, signer.pubkey()).await
+                                    {
                                         if proof != loaded_proof {
                                             info!("Got new proof.");
-                                            let balance = (loaded_proof.balance as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
+                                            let balance = (loaded_proof.balance as f64)
+                                                / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
                                             info!("New balance: {}", balance);
                                             let rewards = loaded_proof.balance - proof.balance;
-                                            let rewards = (rewards as f64) / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
+                                            let rewards = (rewards as f64)
+                                                / 10f64.powf(ORE_TOKEN_DECIMALS as f64);
                                             info!("Earned: {} ORE", rewards);
 
-                                            let _ = mine_success_sender.send(MessageInternalMineSuccess {
-                                                difficulty,
-                                                total_balance: balance,
-                                                rewards
-                                            });
+                                            let _ = mine_success_sender.send(
+                                                MessageInternalMineSuccess {
+                                                    difficulty,
+                                                    total_balance: balance,
+                                                    rewards,
+                                                },
+                                            );
 
                                             {
                                                 let mut mut_proof = app_proof.lock().await;
@@ -376,21 +420,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-
     let app_shared_state = shared_state.clone();
     tokio::spawn(async move {
         loop {
             while let Some(msg) = mine_success_receiver.recv().await {
                 let message = format!(
                     "Submitted Difficulty: {}\nEarned: {} ORE.\nTotal Balance: {}\n",
-                    msg.difficulty,
-                    msg.rewards,
-                    msg.total_balance
+                    msg.difficulty, msg.rewards, msg.total_balance
                 );
                 {
                     let shared_state = app_shared_state.read().await;
                     for (_socket_addr, socket_sender) in shared_state.sockets.iter() {
-                        if let Ok(_) = socket_sender.lock().await.send(Message::Text(message.clone())).await {
+                        if let Ok(_) = socket_sender
+                            .lock()
+                            .await
+                            .send(Message::Text(message.clone()))
+                            .await
+                        {
                         } else {
                             println!("Failed to send client text");
                         }
@@ -411,13 +457,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Logging
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(DefaultMakeSpan::default().include_headers(true))
+                .make_span_with(DefaultMakeSpan::default().include_headers(true)),
         );
 
-
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
     tracing::debug!("listening on {}", listener.local_addr().unwrap());
 
@@ -425,14 +468,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         ping_check_system(&app_shared_state).await;
     });
-    
+
     axum::serve(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>()
-    ).await
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
     .unwrap();
 
     Ok(())
+}
+
+pub fn read_keys(key_folder: &str) -> Vec<Keypair> {
+    fs::read_dir(key_folder)
+        .expect("Failed to read key folder")
+        .map(|entry| {
+            let path = entry.expect("Failed to read entry").path();
+            read_keypair_file(&path)
+                .unwrap_or_else(|_| panic!("Failed to read keypair from {:?}", path))
+        })
+        .collect::<Vec<_>>()
 }
 
 async fn ws_handler(
@@ -443,7 +498,6 @@ async fn ws_handler(
     Extension(client_channel): Extension<UnboundedSender<ClientMessage>>,
     Extension(config): Extension<Arc<Mutex<Config>>>,
 ) -> impl IntoResponse {
-
     let password = auth_header.password();
     if config.lock().await.password.ne(password) {
         error!("Auth failed..");
@@ -452,12 +506,20 @@ async fn ws_handler(
 
     println!("Client: {addr} connected.");
 
-
     Ok(ws.on_upgrade(move |socket| handle_socket(socket, addr, app_state, client_channel)))
 }
 
-async fn handle_socket(mut socket: WebSocket, who: SocketAddr, app_state: Arc<RwLock<AppState>>, client_channel: UnboundedSender<ClientMessage>) {
-    if socket.send(axum::extract::ws::Message::Ping(vec![1, 2, 3])).await.is_ok() {
+async fn handle_socket(
+    mut socket: WebSocket,
+    who: SocketAddr,
+    app_state: Arc<RwLock<AppState>>,
+    client_channel: UnboundedSender<ClientMessage>,
+) {
+    if socket
+        .send(axum::extract::ws::Message::Ping(vec![1, 2, 3]))
+        .await
+        .is_ok()
+    {
         println!("Pinged {who}...");
     } else {
         println!("could not ping {who}");
@@ -482,16 +544,21 @@ async fn handle_socket(mut socket: WebSocket, who: SocketAddr, app_state: Arc<Rw
                 break;
             }
         }
-    }).await;
+    })
+    .await;
 
     println!("Client: {who} disconnected!");
 }
 
-fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSender<ClientMessage>) -> ControlFlow<(), ()> {
+fn process_message(
+    msg: Message,
+    who: SocketAddr,
+    client_channel: UnboundedSender<ClientMessage>,
+) -> ControlFlow<(), ()> {
     match msg {
         Message::Text(t) => {
             println!(">>> {who} sent str: {t:?}");
-        },
+        }
         Message::Binary(d) => {
             // first 8 bytes are message type
             let message_type = d[0];
@@ -499,11 +566,11 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
                 0 => {
                     let msg = ClientMessage::Ready(who);
                     let _ = client_channel.send(msg);
-                },
+                }
                 1 => {
                     let msg = ClientMessage::Mining(who);
                     let _ = client_channel.send(msg);
-                },
+                }
                 2 => {
                     // parse solution from message data
                     let mut solution_bytes = [0u8; 16];
@@ -524,13 +591,12 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
 
                     let msg = ClientMessage::BestSolution(who, solution);
                     let _ = client_channel.send(msg);
-                },
+                }
                 _ => {
                     println!(">>> {} sent an invalid message", who);
                 }
             }
-
-        },
+        }
         Message::Close(c) => {
             if let Some(cf) = c {
                 println!(
@@ -540,14 +606,14 @@ fn process_message(msg: Message, who: SocketAddr, client_channel: UnboundedSende
             } else {
                 println!(">>> {who} somehow sent close message without CloseFrame");
             }
-            return ControlFlow::Break(())
-        },
+            return ControlFlow::Break(());
+        }
         Message::Pong(v) => {
             //println!(">>> {who} sent pong with {v:?}");
-        },
+        }
         Message::Ping(v) => {
             //println!(">>> {who} sent ping with {v:?}");
-        },
+        }
     }
 
     ControlFlow::Continue(())
@@ -558,7 +624,7 @@ async fn client_message_handler_system(
     shared_state: &Arc<RwLock<AppState>>,
     ready_clients: Arc<Mutex<HashSet<SocketAddr>>>,
     proof: Arc<Mutex<Proof>>,
-    best_hash: Arc<Mutex<BestHash>>
+    best_hash: Arc<Mutex<BestHash>>,
 ) {
     while let Some(client_message) = receiver_channel.recv().await {
         match client_message {
@@ -572,16 +638,21 @@ async fn client_message_handler_system(
                             ready_clients.insert(addr);
                         }
 
-                        if let Ok(_) = sender.lock().await.send(Message::Text(String::from("Client successfully added."))).await {
+                        if let Ok(_) = sender
+                            .lock()
+                            .await
+                            .send(Message::Text(String::from("Client successfully added.")))
+                            .await
+                        {
                         } else {
                             println!("Failed notify client they were readied up!");
                         }
                     }
                 }
-            },
+            }
             ClientMessage::Mining(addr) => {
                 println!("Client {} has started mining!", addr.to_string());
-            },
+            }
             ClientMessage::BestSolution(addr, solution) => {
                 println!("Client {} found a solution.", addr);
                 let challenge = {
@@ -616,16 +687,20 @@ async fn client_message_handler_system(
     }
 }
 
-async fn ping_check_system(
-    shared_state: &Arc<RwLock<AppState>>,
-) {
+async fn ping_check_system(shared_state: &Arc<RwLock<AppState>>) {
     loop {
         // send ping to all sockets
         let mut failed_sockets = Vec::new();
         let app_state = shared_state.read().await;
         // I don't like doing all this work while holding this lock...
         for (who, socket) in app_state.sockets.iter() {
-            if socket.lock().await.send(Message::Ping(vec![1, 2, 3])).await.is_ok() {
+            if socket
+                .lock()
+                .await
+                .send(Message::Ping(vec![1, 2, 3]))
+                .await
+                .is_ok()
+            {
                 //println!("Pinged: {who}...");
             } else {
                 failed_sockets.push(who.clone());
@@ -636,7 +711,7 @@ async fn ping_check_system(
         // remove any sockets where ping failed
         let mut app_state = shared_state.write().await;
         for address in failed_sockets {
-             app_state.sockets.remove(&address);
+            app_state.sockets.remove(&address);
         }
         drop(app_state);
 

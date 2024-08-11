@@ -3,11 +3,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use crossbeam_channel::{Receiver, Sender};
 use drillx::{equix, Hash, Solution};
 use ore_api::{
-    ID as ORE_ID,
+    consts::{
+        BUS_ADDRESSES, CONFIG_ADDRESS, EPOCH_DURATION, MINT_ADDRESS, PROOF, TOKEN_DECIMALS,
+        TREASURY_ADDRESS,
+    },
     instruction,
     state::{Proof, Treasury},
-    consts::{BUS_ADDRESSES, CONFIG_ADDRESS, EPOCH_DURATION, MINT_ADDRESS, PROOF,
-    TOKEN_DECIMALS, TREASURY_ADDRESS }
+    ID as ORE_ID,
 };
 pub use ore_utils::AccountDeserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -24,7 +26,7 @@ pub enum MiningDataChannelMessage {
     Stop,
 }
 
-pub fn get_auth_ix(signer: Pubkey, ) -> Instruction {
+pub fn get_auth_ix(signer: Pubkey) -> Instruction {
     let proof = proof_pubkey(signer);
 
     instruction::auth(proof)
@@ -153,7 +155,12 @@ pub async fn get_proof_and_treasury_with_busses(
             Err(())
         };
 
-        (proof, treasury, treasury_config, Ok(vec![bus_1, bus_2, bus_3, bus_4, bus_5, bus_6, bus_7, bus_8]))
+        (
+            proof,
+            treasury,
+            treasury_config,
+            Ok(vec![bus_1, bus_2, bus_3, bus_4, bus_5, bus_6, bus_7, bus_8]),
+        )
     } else {
         (Err(()), Err(()), Err(()), Err(()))
     }
@@ -175,9 +182,9 @@ pub async fn get_proof(client: &RpcClient, authority: Pubkey) -> Result<Proof, S
         Ok(data) => {
             let proof = Proof::try_from_bytes(&data);
             if let Ok(proof) = proof {
-                return Ok(*proof)
+                return Ok(*proof);
             } else {
-                return Err("Failed to parse proof account".to_string())
+                return Err("Failed to parse proof account".to_string());
             }
         }
         Err(_) => return Err("Failed to get proof account".to_string()),
@@ -216,7 +223,14 @@ pub fn get_cutoff(proof: Proof, buffer_time: u64) -> i64 {
         .saturating_sub(now)
 }
 
-pub fn find_hash_par(proof: Proof, cutoff_time: u64, threads: u64, min_difficulty: u32, mining_messages_reciever: Receiver<MiningDataChannelMessage>, mining_messages_sender: Sender<MiningDataChannelMessage>) -> (Solution, u32, Hash, u64) {
+pub fn find_hash_par(
+    proof: Proof,
+    cutoff_time: u64,
+    threads: u64,
+    min_difficulty: u32,
+    mining_messages_reciever: Receiver<MiningDataChannelMessage>,
+    mining_messages_sender: Sender<MiningDataChannelMessage>,
+) -> (Solution, u32, Hash, u64) {
     let handles = (0..threads)
         .map(|i| {
             std::thread::spawn({
@@ -242,18 +256,16 @@ pub fn find_hash_par(proof: Proof, cutoff_time: u64, threads: u64, min_difficult
                             total_hashes += 1;
                             let difficulty = hash.difficulty();
                             if difficulty.gt(&best_difficulty) {
-                                    best_nonce = nonce;
-                                    best_difficulty = difficulty;
-                                    best_hash = hash;
+                                best_nonce = nonce;
+                                best_difficulty = difficulty;
+                                best_hash = hash;
                             }
                         }
-
-
 
                         if let Ok(message) = message_receiver.try_recv() {
                             match message {
                                 MiningDataChannelMessage::Stop => {
-                                    // messages are only received by one receiver. 
+                                    // messages are only received by one receiver.
                                     // try to send another message for any remaining receivers.
                                     let _ = message_sender.try_send(MiningDataChannelMessage::Stop);
                                     break;
@@ -270,13 +282,13 @@ pub fn find_hash_par(proof: Proof, cutoff_time: u64, threads: u64, min_difficult
                                     let _ = message_sender.try_send(MiningDataChannelMessage::Stop);
                                     break;
                                 }
-                            } 
+                            }
                         }
 
                         // Increment nonce
                         nonce += 1;
                     }
-                    
+
                     // Return the best nonce
                     Some((best_nonce, best_difficulty, best_hash, total_hashes))
                 }
@@ -301,5 +313,10 @@ pub fn find_hash_par(proof: Proof, cutoff_time: u64, threads: u64, min_difficult
             error!("Failed to join a thread handle!");
         }
     }
-    (Solution::new(best_hash.d, best_nonce.to_le_bytes()), best_difficulty, best_hash, total_nonces_checked)
+    (
+        Solution::new(best_hash.d, best_nonce.to_le_bytes()),
+        best_difficulty,
+        best_hash,
+        total_nonces_checked,
+    )
 }
