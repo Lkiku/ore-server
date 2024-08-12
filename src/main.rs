@@ -468,8 +468,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         tokio::time::sleep(Duration::from_millis(500)).await;
                                     }
-                                    info!("Exit_proof times: {}", exit_proof);
-                                    if exit_proof >= 50 {
+                                    // info!("Exit_proof times: {}", exit_proof);
+                                    if exit_proof >= 100 {
                                         info!("Exit_proof surpass max times, exitting now!: {}", exit_proof);
                                         break;
                                     }
