@@ -51,7 +51,7 @@ use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-const MIN_DIFF: u32 = 8;
+const MIN_DIFF: u32 = 15;
 const MIN_HASHPOWER: u64 = 5;
 const RPC_RETRIES: usize = 0;
 
