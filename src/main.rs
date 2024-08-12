@@ -123,7 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // load envs
     let wallet_path_str = std::env::var("WALLET_PATH").expect("WALLET_PATH must be set.");
-    // let key_folder = std::env::var("KEY_FOLDER").expect("KEY_FOLDER must be set.");
+    let key_folder = std::env::var("KEY_FOLDER").expect("KEY_FOLDER must be set.");
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set.");
     let password = std::env::var("PASSWORD").expect("PASSWORD must be set.");
     let priority_fee = Arc::new(Mutex::new(args.priority_fee));
@@ -435,7 +435,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 info!("Success!!");
                                 info!("Sig: {}", sig);
                                 // update proof
+                                let mut exit_proof = 0;
                                 loop {
+                                    exit_proof += 1;
                                     if let Ok(loaded_proof) =
                                         get_proof(&rpc_client, signer.pubkey()).await
                                     {
@@ -465,6 +467,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     } else {
                                         tokio::time::sleep(Duration::from_millis(500)).await;
+                                    }
+                                    info!("Exit_proof times: {}", exit_proof);
+                                    if exit_proof >= 50 {
+                                        info!("Exit_proof surpass max times, exitting now!: {}", exit_proof);
+                                        break;
                                     }
                                 }
                                 // reset nonce
@@ -571,7 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn _read_keys(key_folder: &str) -> Vec<Keypair> {
+pub fn read_keys(key_folder: &str) -> Vec<Keypair> {
     fs::read_dir(key_folder)
         .expect("Failed to read key folder")
         .map(|entry| {
