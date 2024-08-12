@@ -12,6 +12,7 @@ use ore_api::{
     ID as ORE_ID,
 };
 pub use ore_utils::AccountDeserialize;
+use serde::Deserialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::{
     account::ReadableAccount, clock::Clock, instruction::Instruction, pubkey::Pubkey, sysvar,
@@ -20,6 +21,18 @@ use spl_associated_token_account::get_associated_token_address;
 use tracing::error;
 
 pub const ORE_TOKEN_DECIMALS: u8 = TOKEN_DECIMALS;
+
+#[derive(Debug, Deserialize)]
+
+pub struct Tip {
+    pub time: String,
+    pub landed_tips_25th_percentile: f64,
+    pub landed_tips_50th_percentile: f64,
+    pub landed_tips_75th_percentile: f64,
+    pub landed_tips_95th_percentile: f64,
+    pub landed_tips_99th_percentile: f64,
+    pub ema_landed_tips_50th_percentile: f64,
+}
 
 #[derive(Debug)]
 pub enum MiningDataChannelMessage {
@@ -40,31 +53,31 @@ pub fn get_register_ix(signer: Pubkey) -> Instruction {
     instruction::open(signer, signer, signer)
 }
 
-pub fn get_reset_ix(signer: Pubkey) -> Instruction {
-    instruction::reset(signer)
-}
+// pub fn get_reset_ix(signer: Pubkey) -> Instruction {
+//     instruction::reset(signer)
+// }
 
-pub fn get_claim_ix(signer: Pubkey, beneficiary: Pubkey, claim_amount: u64) -> Instruction {
-    instruction::claim(signer, beneficiary, claim_amount)
-}
+// pub fn get_claim_ix(signer: Pubkey, beneficiary: Pubkey, claim_amount: u64) -> Instruction {
+//     instruction::claim(signer, beneficiary, claim_amount)
+// }
 
-pub fn get_stake_ix(signer: Pubkey, sender: Pubkey, stake_amount: u64) -> Instruction {
-    instruction::stake(signer, sender, stake_amount)
-}
+// pub fn get_stake_ix(signer: Pubkey, sender: Pubkey, stake_amount: u64) -> Instruction {
+//     instruction::stake(signer, sender, stake_amount)
+// }
 
-pub fn get_ore_mint() -> Pubkey {
-    MINT_ADDRESS
-}
+// pub fn get_ore_mint() -> Pubkey {
+//     MINT_ADDRESS
+// }
 
-pub fn get_ore_epoch_duration() -> i64 {
-    EPOCH_DURATION
-}
+// pub fn get_ore_epoch_duration() -> i64 {
+//     EPOCH_DURATION
+// }
 
-pub fn get_ore_decimals() -> u8 {
-    TOKEN_DECIMALS
-}
+// pub fn get_ore_decimals() -> u8 {
+//     TOKEN_DECIMALS
+// }
 
-pub async fn get_proof_and_treasury_with_busses(
+pub async fn _get_proof_and_treasury_with_busses(
     client: &RpcClient,
     authority: Pubkey,
 ) -> (
@@ -166,7 +179,7 @@ pub async fn get_proof_and_treasury_with_busses(
     }
 }
 
-pub async fn get_treasury(client: &RpcClient) -> Result<Treasury, ()> {
+pub async fn _get_treasury(client: &RpcClient) -> Result<Treasury, ()> {
     let data = client.get_account_data(&TREASURY_ADDRESS).await;
     if let Ok(data) = data {
         Ok(*Treasury::try_from_bytes(&data).expect("Failed to parse treasury account"))
@@ -195,11 +208,11 @@ pub fn proof_pubkey(authority: Pubkey) -> Pubkey {
     Pubkey::find_program_address(&[PROOF, authority.as_ref()], &ORE_ID).0
 }
 
-pub fn treasury_tokens_pubkey() -> Pubkey {
+pub fn _treasury_tokens_pubkey() -> Pubkey {
     get_associated_token_address(&TREASURY_ADDRESS, &MINT_ADDRESS)
 }
 
-pub async fn get_clock_account(client: &RpcClient) -> Result<Clock, ()> {
+pub async fn _get_clock_account(client: &RpcClient) -> Result<Clock, ()> {
     if let Ok(data) = client.get_account_data(&sysvar::clock::ID).await {
         if let Ok(data) = bincode::deserialize::<Clock>(&data) {
             Ok(data)
@@ -223,7 +236,7 @@ pub fn get_cutoff(proof: Proof, buffer_time: u64) -> i64 {
         .saturating_sub(now)
 }
 
-pub fn find_hash_par(
+pub fn _find_hash_par(
     proof: Proof,
     cutoff_time: u64,
     threads: u64,

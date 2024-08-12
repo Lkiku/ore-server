@@ -1,11 +1,12 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs,
     net::SocketAddr,
     ops::ControlFlow,
     path::Path,
+    str::FromStr,
     sync::Arc,
     time::Duration,
-    fs,
 };
 
 use axum::{
@@ -24,30 +25,35 @@ use drillx::Solution;
 use futures::{stream::SplitSink, SinkExt, StreamExt};
 use ore_api::{consts::BUS_COUNT, state::Proof};
 use ore_utils::{
-    get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, ORE_TOKEN_DECIMALS,
+    get_auth_ix, get_cutoff, get_mine_ix, get_proof, get_register_ix, Tip, ORE_TOKEN_DECIMALS,
 };
 use rand::Rng;
-use solana_client::nonblocking::rpc_client::RpcClient;
+use tokio_tungstenite::connect_async;
+use rand::seq::SliceRandom;
+use solana_client::{nonblocking::rpc_client::RpcClient, rpc_config::RpcSendTransactionConfig};
 use solana_sdk::{
-    commitment_config::CommitmentConfig, 
+    commitment_config::{CommitmentConfig, CommitmentLevel},
     compute_budget::ComputeBudgetInstruction,
-    native_token::LAMPORTS_PER_SOL, 
-    pubkey::Pubkey, 
-    signature::read_keypair_file, 
+    native_token::{lamports_to_sol, LAMPORTS_PER_SOL},
+    pubkey::Pubkey,
+    signature::read_keypair_file,
     signature::Keypair,
     signer::Signer,
+    system_instruction::transfer,
     transaction::Transaction,
 };
+use solana_transaction_status::UiTransactionEncoding;
 use tokio::sync::{
     mpsc::{UnboundedReceiver, UnboundedSender},
     Mutex, RwLock,
 };
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
-use tracing::{debug, error, info};
+use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const MIN_DIFF: u32 = 8;
 const MIN_HASHPOWER: u64 = 5;
+const RPC_RETRIES: usize = 0;
 
 struct AppState {
     sockets: HashMap<SocketAddr, Mutex<SplitSink<WebSocket, Message>>>,
@@ -66,10 +72,10 @@ pub enum ClientMessage {
     BestSolution(SocketAddr, Solution),
 }
 
-pub struct EpochHashes {
-    best_hash: BestHash,
-    submissions: HashMap<Pubkey, u32>,
-}
+// pub struct EpochHashes {
+//     best_hash: BestHash,
+//     submissions: HashMap<Pubkey, u32>,
+// }
 
 pub struct BestHash {
     solution: Option<Solution>,
@@ -93,6 +99,14 @@ struct Args {
         global = true
     )]
     priority_fee: u64,
+
+    #[arg(
+        long,
+        value_name = "JITO",
+        help = "Add jito tip to the miner. Defaults to false.",
+        global = true
+    )]
+    jito: bool,
 }
 
 #[tokio::main]
@@ -109,10 +123,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // load envs
     let wallet_path_str = std::env::var("WALLET_PATH").expect("WALLET_PATH must be set.");
-    let key_folder = std::env::var("KEY_FOLDER").expect("KEY_FOLDER must be set.");
+    // let key_folder = std::env::var("KEY_FOLDER").expect("KEY_FOLDER must be set.");
     let rpc_url = std::env::var("RPC_URL").expect("RPC_URL must be set.");
     let password = std::env::var("PASSWORD").expect("PASSWORD must be set.");
     let priority_fee = Arc::new(Mutex::new(args.priority_fee));
+
+    // Add jito
+    let jito_client =
+        RpcClient::new("https://mainnet.block-engine.jito.wtf/api/v1/transactions".to_string());
+    let tip = Arc::new(std::sync::RwLock::new(0_u64));
+    let tip_clone = Arc::clone(&tip);
+
+    if args.jito {
+        let url = "ws://bundles-api-rest.jito.wtf/api/v1/bundles/tip_stream";
+        let (ws_stream, _) = connect_async(url).await.unwrap();
+        let (_, mut read) = ws_stream.split();
+
+        tokio::spawn(async move {
+            while let Some(message) = read.next().await {
+                if let Ok(tokio_tungstenite::tungstenite::protocol::Message::Text(text)) = message {
+                    if let Ok(tips) = serde_json::from_str::<Vec<Tip>>(&text) {
+                        for item in tips {
+                            let mut tip = tip_clone.write().unwrap();
+                            *tip = (item.landed_tips_50th_percentile * (10_f64).powf(9.0)) as u64;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // load key folder
+    // let signer = read_keys(&key_folder);
+
+    // for (i, keys) in signer.chunks(5).enumerate() {
+    //     // let args = args.clone();
+    //     let signers = keys
+    //         .iter()
+    //         .map(|key| Arc::new(key.insecure_clone()))
+    //         .collect::<Vec<_>>();
+    // }
 
     // load wallet
     let wallet_path = Path::new(&wallet_path_str);
@@ -292,7 +342,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_best_hash = best_hash.clone();
     let app_wallet = wallet_extension.clone();
     let app_nonce = nonce_ext.clone();
-    let app_prio_fee = priority_fee.clone();
+
+    let current_tip = *tip.read().unwrap();
+
+    // let rpc_client = if current_tip > 0 {
+    //     Arc::new(jito_client)
+    // } else {
+    //     Arc::new(rpc_client)
+    // };
+
+    let tips = [
+        "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+        "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+        "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+        "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+        "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+        "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+        "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+        "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+    ];
+
+    // Build tx
+    let send_cfg = RpcSendTransactionConfig {
+        skip_preflight: true,
+        preflight_commitment: Some(CommitmentLevel::Confirmed),
+        encoding: Some(UiTransactionEncoding::Base64),
+        max_retries: Some(RPC_RETRIES),
+        min_context_slot: None,
+    };
+
+    // let app_prio_fee = priority_fee.clone();
     tokio::spawn(async move {
         loop {
             let proof = { app_proof.lock().await.clone() };
@@ -326,6 +405,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "Starting mine submission attempts with difficulty {}.",
                         difficulty
                     );
+                    // add jito
+                    ixs.push(transfer(
+                        &signer.pubkey(),
+                        &Pubkey::from_str(
+                            &tips.choose(&mut rand::thread_rng()).unwrap().to_string(),
+                        )
+                        .unwrap(),
+                        current_tip,
+                    ));
+                    info!("Jito tip: {} SOL", lamports_to_sol(current_tip));
+
                     if let Ok((hash, _slot)) = rpc_client
                         .get_latest_blockhash_with_commitment(rpc_client.commitment())
                         .await
@@ -337,7 +427,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for i in 0..3 {
                             info!("Sending signed tx...");
                             info!("attempt: {}", i + 1);
-                            let sig = rpc_client.send_and_confirm_transaction(&tx).await;
+                            let sig = jito_client
+                                .send_transaction_with_config(&tx, send_cfg)
+                                .await;
                             if let Ok(sig) = sig {
                                 // success
                                 info!("Success!!");
@@ -479,7 +571,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn read_keys(key_folder: &str) -> Vec<Keypair> {
+pub fn _read_keys(key_folder: &str) -> Vec<Keypair> {
     fs::read_dir(key_folder)
         .expect("Failed to read key folder")
         .map(|entry| {
@@ -608,10 +700,10 @@ fn process_message(
             }
             return ControlFlow::Break(());
         }
-        Message::Pong(v) => {
+        Message::Pong(_v) => {
             //println!(">>> {who} sent pong with {v:?}");
         }
-        Message::Ping(v) => {
+        Message::Ping(_v) => {
             //println!(">>> {who} sent ping with {v:?}");
         }
     }

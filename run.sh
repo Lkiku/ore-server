@@ -1,0 +1,1 @@
+./target/release/ore-hq-server --priority-fee 1000 --jito
